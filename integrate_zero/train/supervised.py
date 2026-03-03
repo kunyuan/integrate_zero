@@ -8,8 +8,6 @@ Trains the model on (integrand, antiderivative) pairs using:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
