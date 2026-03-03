@@ -29,8 +29,10 @@ import math
 from typing import List, Optional, Tuple
 
 import sympy
+import torch
 from sympy import Symbol
 
+from integrate_zero.data.prefix import prefix_to_sympy, sympy_to_prefix
 from integrate_zero.verify.verifier import StepType, is_terminal, verify_step
 
 
@@ -357,9 +359,20 @@ class MCTS:
     ) -> List[Tuple[sympy.Expr, float]]:
         """Generate candidate next-expressions from the model.
 
-        .. note::
-            This is a **placeholder** that returns an empty list.
-            It will be filled in by Task 11 (MCTS-Model Integration).
+        Bridges the neural network (token generation) with MCTS (SymPy
+        expressions):
+
+        1. Convert ``state`` to prefix tokens via ``sympy_to_prefix()``.
+        2. Build prompt: ``[BOS] state_tokens [SEP]``.
+        3. Convert to tensor IDs using the vocabulary.
+        4. Run ``model.generate()`` multiple times with temperature sampling.
+        5. For each generated sequence, extract tokens after [SEP] and
+           before [EOS], then convert back to SymPy via ``prefix_to_sympy()``.
+        6. Return list of ``(sympy_expr, prior)`` tuples. Uses a uniform
+           prior of ``1.0 / num_candidates``.
+
+        If a generated sequence cannot be parsed back to SymPy it is
+        silently skipped.
 
         Parameters
         ----------
@@ -371,14 +384,95 @@ class MCTS:
         list[tuple[sympy.Expr, float]]
             Pairs of (candidate_expression, prior_probability).
         """
-        return []
+        # Fallback: if no model/vocab is available, return empty list
+        if self.model is None or self.vocab is None:
+            return []
+
+        # Step 1: Convert state to prefix tokens
+        try:
+            state_tokens = sympy_to_prefix(state)
+        except (ValueError, TypeError):
+            return []
+
+        # Step 2: Build prompt [BOS] state_tokens [SEP]
+        prompt_tokens = ["BOS"] + state_tokens + ["SEP"]
+
+        # Step 3: Convert to tensor IDs
+        prompt_ids = []
+        for tok in prompt_tokens:
+            tid = self.vocab.token_to_id(tok)
+            if tid is None:
+                return []  # Unknown token in the state -- cannot proceed
+            prompt_ids.append(tid)
+
+        device = next(self.model.parameters()).device
+        prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+
+        # Step 4 & 5: Generate multiple candidates
+        uniform_prior = 1.0 / self.num_candidates
+        candidates: List[Tuple[sympy.Expr, float]] = []
+
+        sep_id = self.vocab.sep_id
+        eos_id = self.vocab.eos_id
+
+        for _ in range(self.num_candidates):
+            try:
+                generated = self.model.generate(
+                    prompt=prompt_tensor,
+                    max_new_tokens=50,
+                    vocab=self.vocab,
+                    temperature=1.0,
+                    eos_id=eos_id,
+                )
+            except Exception:
+                continue
+
+            # Extract the full sequence of token IDs
+            seq = generated[0].tolist()
+
+            # Find the last SEP position and extract tokens after it
+            last_sep_idx = -1
+            for i, tid in enumerate(seq):
+                if tid == sep_id:
+                    last_sep_idx = i
+
+            if last_sep_idx == -1:
+                continue
+
+            # Tokens after SEP and before EOS
+            after_sep = seq[last_sep_idx + 1:]
+            output_tokens = []
+            for tid in after_sep:
+                if tid == eos_id:
+                    break
+                tok = self.vocab.id_to_token(tid)
+                if tok is None:
+                    break
+                output_tokens.append(tok)
+
+            if not output_tokens:
+                continue
+
+            # Step 6: Convert back to SymPy
+            try:
+                expr = prefix_to_sympy(output_tokens)
+            except (ValueError, TypeError, IndexError):
+                continue
+
+            candidates.append((expr, uniform_prior))
+
+        return candidates
 
     def _evaluate(self, node: MCTSNode) -> float:
         """Evaluate a node using the value head of the model.
 
-        .. note::
-            This is a **placeholder** that returns 0.5.
-            It will be filled in by Task 11 (MCTS-Model Integration).
+        For terminal nodes (no remaining ``Integral``), returns 1.0
+        immediately.  Otherwise, converts the node's state to prefix
+        tokens, builds an input tensor ``[BOS] state_tokens [SEP]``,
+        runs the model forward pass, and returns the value head output
+        (sigmoid probability at the SEP position) as a float.
+
+        Falls back to 0.5 if no model or vocabulary is available.
 
         Parameters
         ----------
@@ -388,6 +482,44 @@ class MCTS:
         Returns
         -------
         float
-            The estimated value of the node's state.
+            The estimated value of the node's state (in [0, 1]).
         """
-        return 0.5
+        # Fallback: if no model/vocab is available, return placeholder
+        if self.model is None or self.vocab is None:
+            return 0.5
+
+        # Terminal nodes are solved -- value is 1.0
+        if node.is_terminal():
+            return 1.0
+
+        # Step 1: Convert state to prefix tokens
+        try:
+            state_tokens = sympy_to_prefix(node.state)
+        except (ValueError, TypeError):
+            return 0.5
+
+        # Step 2: Build input [BOS] state_tokens [SEP]
+        input_tokens = ["BOS"] + state_tokens + ["SEP"]
+
+        # Step 3: Convert to tensor IDs
+        input_ids = []
+        for tok in input_tokens:
+            tid = self.vocab.token_to_id(tok)
+            if tid is None:
+                return 0.5  # Unknown token -- cannot evaluate
+            input_ids.append(tid)
+
+        device = next(self.model.parameters()).device
+        input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
+
+        # Step 4: Run model forward pass (no gradient needed for search)
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            _logits, value = self.model(input_tensor)
+
+        if was_training:
+            self.model.train()
+
+        # Step 5: Return the value head output as a float
+        return value.item()
