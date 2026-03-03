@@ -31,7 +31,6 @@ from sympy import (
     Integer,
     Integral,
     Mul,
-    Number,
     Pow,
     Rational,
     Symbol,
@@ -39,11 +38,7 @@ from sympy import (
 )
 from sympy.core.numbers import (
     Exp1,
-    Half,
-    NegativeOne,
-    One,
     Pi,
-    Zero,
 )
 
 # ---------------------------------------------------------------------------
