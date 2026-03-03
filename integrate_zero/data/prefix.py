@@ -286,47 +286,71 @@ def _mul_to_prefix(expr: Mul) -> List[str]:
 
     For n-ary products we left-fold: Mul(a, b, c) -> mul(mul(a, b), c).
     """
-    # Extract the coefficient and the rest of the product.
+    # Extract the numeric coefficient and the rest of the product.
+    # e.g., -3*x -> coeff=-3, rest=x
+    #       -x   -> coeff=-1, rest=x
+    #       x/a  -> coeff=1, rest=x/a (but as_coeff_Mul may not split Pow)
     coeff, rest = expr.as_coeff_Mul()
 
-    # Check if the whole expression is just negation: Mul(-1, something)
-    # where "something" is a single thing.
-    is_negated = False
+    # Handle pure negation: Mul(-1, x) -> ["neg", "x"]
     if coeff == sympy.S.NegativeOne:
-        is_negated = True
-        inner = rest
-    elif isinstance(coeff, Integer) and int(coeff) < 0:
-        # e.g., Mul(-3, x) -> neg(mul(3, x)) or mul(-3, x)
+        return ["neg"] + _to_prefix(rest)
+
+    # Handle negative coefficient that fits in vocabulary:
+    # Mul(-3, x) -> ["mul", "-3", "x"]
+    # Handle negative coefficient outside vocabulary:
+    # Mul(-30, x) -> ["neg", "mul", "30", "x"]
+    if isinstance(coeff, Integer) and int(coeff) < 0:
         neg_val = int(coeff)
         if _MIN_INT <= neg_val <= _MAX_INT:
-            # We can represent the negative coefficient directly.
-            # Treat it as a regular mul factor.
-            is_negated = False
-            inner = expr  # process whole expression as-is
+            # Treat the negative coefficient as one factor.
+            # Build factor list: [Integer(neg_val)] + non-coeff factors.
+            factors = [Integer(neg_val)] + _non_coeff_factors(rest)
+            return _factors_to_prefix(factors, expr)
         else:
-            is_negated = True
-            inner = -expr
-    else:
-        inner = expr
+            # Use neg(mul(abs(coeff), rest))
+            return ["neg"] + _to_prefix(-expr)
 
-    if is_negated:
-        inner_tokens = _to_prefix(inner)
-        return ["neg"] + inner_tokens
+    # Positive or unit coefficient.
+    # Build the factor list from the original expression's factors,
+    # but using as_coeff_Mul to keep the coefficient as one unit.
+    factors: List[Expr] = []
+    if isinstance(coeff, Integer) and int(coeff) != 1:
+        factors.append(coeff)
+    elif isinstance(coeff, Rational) and coeff != sympy.S.One:
+        factors.append(coeff)
+    factors.extend(_non_coeff_factors(rest))
 
-    # Now process the (possibly modified) Mul expression.
-    # Separate numerator factors and denominator factors.
+    return _factors_to_prefix(factors, expr)
+
+
+def _non_coeff_factors(expr: Expr) -> List[Expr]:
+    """Get the non-coefficient factors of *expr* in ordered form.
+
+    If *expr* is a Mul, returns its ordered factors.
+    Otherwise returns [expr].
+    """
+    if isinstance(expr, Mul):
+        return list(expr.as_ordered_factors())
+    if expr == sympy.S.One:
+        return []
+    return [expr]
+
+
+def _factors_to_prefix(factors: List[Expr], original: Expr) -> List[str]:
+    """Convert a list of factors to prefix tokens, handling division.
+
+    Separates numerator factors from denominator factors (Pow(x, -1)),
+    then left-folds each group, wrapping with div if needed.
+    """
     numer_factors: List[Expr] = []
     denom_factors: List[Expr] = []
 
-    if isinstance(inner, Mul):
-        for arg in inner.as_ordered_factors():
-            if isinstance(arg, Pow) and _is_inverse_power(arg):
-                denom_factors.append(arg.args[0])
-            else:
-                numer_factors.append(arg)
-    else:
-        # `inner` is not a Mul anymore (e.g. it simplified to a single term)
-        return _to_prefix(inner)
+    for arg in factors:
+        if isinstance(arg, Pow) and _is_inverse_power(arg):
+            denom_factors.append(arg.args[0])
+        else:
+            numer_factors.append(arg)
 
     # Build numerator token list (left-fold mul).
     if not numer_factors:
