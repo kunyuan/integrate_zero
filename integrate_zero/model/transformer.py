@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from integrate_zero.model.decoding import ArityMask
+
 
 class IntegrateZeroModel(nn.Module):
     """Decoder-only Transformer with a value head for symbolic integration.
@@ -287,17 +289,59 @@ class IntegrateZeroModel(nn.Module):
     ) -> torch.Tensor:
         """Apply arity-constrained masking to logits during generation.
 
-        This is a placeholder that will be implemented in Task 8.
-        Currently returns logits unmodified.
+        Extracts the tokens generated after the last SEP in
+        ``generated_so_far``, computes the set of allowed next tokens
+        via :class:`ArityMask`, and sets disallowed logits to ``-inf``.
 
         Parameters
         ----------
         logits : Tensor, shape ``(1, vocab_size)``
         generated_so_far : Tensor, shape ``(1, T)``
         vocab : Vocabulary
+            Must be a :class:`~integrate_zero.data.vocabulary.Vocabulary`
+            instance.  If ``None``, the mask is skipped and logits are
+            returned unchanged.
 
         Returns
         -------
         Tensor, shape ``(1, vocab_size)``
         """
-        return logits
+        if vocab is None:
+            return logits
+
+        # Build the ArityMask (lightweight; could be cached but creation
+        # is cheap enough for per-step use).
+        arity_mask = ArityMask(vocab)
+
+        # Extract token IDs after the last SEP in the generated sequence.
+        token_ids = generated_so_far[0].tolist()
+        sep_id = vocab.sep_id
+
+        # Find last SEP position
+        last_sep_idx = -1
+        for i, tid in enumerate(token_ids):
+            if tid == sep_id:
+                last_sep_idx = i
+
+        if last_sep_idx == -1:
+            # No SEP found -- cannot apply mask meaningfully.
+            return logits
+
+        # Tokens after SEP (the output expression built so far)
+        after_sep_ids = token_ids[last_sep_idx + 1 :]
+        after_sep_tokens = []
+        for tid in after_sep_ids:
+            tok = vocab.id_to_token(tid)
+            if tok is not None:
+                after_sep_tokens.append(tok)
+
+        # Get allowed token IDs
+        allowed = arity_mask.get_allowed_tokens(after_sep_tokens)
+
+        # Build mask: set disallowed positions to -inf
+        mask = torch.full_like(logits, float("-inf"))
+        allowed_list = list(allowed)
+        if allowed_list:
+            mask[0, allowed_list] = 0.0
+
+        return logits + mask
