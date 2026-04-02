@@ -20,6 +20,7 @@ The training loss mirrors the supervised loop:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 import torch
@@ -128,11 +129,11 @@ class RLTrainer:
         dict
             ``{"policy_loss": float, "value_loss": float, "solve_rate": float}``
         """
-        # Collect episodes
-        episodes = []
-        for problem in problems:
-            episode = self.collect_episode(problem)
-            episodes.append(episode)
+        # Collect episodes in parallel using threads.
+        # GPU inference is thread-safe; SymPy verification uses ProcessPool.
+        self.model.eval()
+        with ThreadPoolExecutor(max_workers=min(len(problems), 16)) as executor:
+            episodes = list(executor.map(self.collect_episode, problems))
 
         solved_count = sum(1 for ep in episodes if ep["solved"])
         solve_rate = solved_count / len(problems) if problems else 0.0

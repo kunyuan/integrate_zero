@@ -12,6 +12,8 @@ Data format:
 from __future__ import annotations
 
 import logging
+import random
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -39,6 +41,8 @@ class IntegrationDataset(Dataset):
     max_len : int, optional
         Maximum sequence length (BOS + f_tokens + SEP + F_tokens + EOS).
         Samples exceeding this length are discarded. Defaults to 512.
+    seed : int or None
+        If not None, seed the RNG before generation for reproducibility.
     """
 
     def __init__(
@@ -46,12 +50,15 @@ class IntegrationDataset(Dataset):
         num_samples: int,
         max_depth: int = 3,
         max_len: int = 512,
+        seed: int | None = None,
     ) -> None:
         super().__init__()
         self.vocab = Vocabulary()
         self.max_len = max_len
         self.samples: List[Dict[str, torch.Tensor]] = []
 
+        if seed is not None:
+            random.seed(seed)
         self._generate_samples(num_samples, max_depth)
 
     def _generate_samples(self, num_samples: int, max_depth: int) -> None:
@@ -153,6 +160,43 @@ class IntegrationDataset(Dataset):
             ``value_label``: float (1.0 for all generated pairs)
         """
         return self.samples[idx]
+
+    def save(self, path: str | Path) -> None:
+        """Save the dataset to a file.
+
+        Parameters
+        ----------
+        path : str or Path
+            File path to save the dataset to.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {"samples": self.samples, "max_len": self.max_len},
+            path,
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "IntegrationDataset":
+        """Load a dataset from a file.
+
+        Parameters
+        ----------
+        path : str or Path
+            File path to load the dataset from.
+
+        Returns
+        -------
+        IntegrationDataset
+            The loaded dataset.
+        """
+        data = torch.load(path, weights_only=False)
+        ds = cls.__new__(cls)
+        Dataset.__init__(ds)
+        ds.vocab = Vocabulary()
+        ds.max_len = data["max_len"]
+        ds.samples = data["samples"]
+        return ds
 
     @staticmethod
     def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

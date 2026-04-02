@@ -32,6 +32,9 @@ class SupervisedTrainer:
         Mini-batch size for training and evaluation.
     lr : float
         Learning rate for the Adam optimizer.
+    val_dataset : IntegrationDataset or None
+        Optional separate validation dataset.  If ``None``, evaluation
+        is performed on the training dataset.
     """
 
     def __init__(
@@ -41,9 +44,11 @@ class SupervisedTrainer:
         vocab: Vocabulary,
         batch_size: int = 256,
         lr: float = 1e-4,
+        val_dataset: IntegrationDataset | None = None,
     ) -> None:
         self.model = model
         self.dataset = dataset
+        self.val_dataset = val_dataset
         self.vocab = vocab
         self.batch_size = batch_size
 
@@ -57,11 +62,16 @@ class SupervisedTrainer:
 
     def _make_dataloader(self, shuffle: bool = True) -> DataLoader:
         """Create a DataLoader over the dataset."""
+        num_workers = 4
+        use_pin_memory = self.device.type == "cuda"
         return DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
             collate_fn=IntegrationDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=use_pin_memory,
+            persistent_workers=num_workers > 0,
         )
 
     def _find_sep_positions(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -116,52 +126,86 @@ class SupervisedTrainer:
 
         return total_loss, policy_loss, value_loss
 
-    def train_epoch(self) -> float:
+    def train_epoch(self) -> dict[str, float]:
         """Train for one full epoch over the dataset.
 
         Returns
         -------
-        float
-            Average total loss over the epoch.
+        dict
+            Keys: ``total_loss``, ``policy_loss``, ``value_loss`` —
+            average values over the epoch.
         """
         self.model.train()
         dataloader = self._make_dataloader(shuffle=True)
 
         total_loss_sum = 0.0
+        policy_loss_sum = 0.0
+        value_loss_sum = 0.0
         num_batches = 0
 
         for batch in dataloader:
             self.optimizer.zero_grad()
-            total_loss, _, _ = self._compute_loss(batch)
+            total_loss, policy_loss, value_loss = self._compute_loss(batch)
             total_loss.backward()
             self.optimizer.step()
 
             total_loss_sum += total_loss.item()
+            policy_loss_sum += policy_loss.item()
+            value_loss_sum += value_loss.item()
             num_batches += 1
 
-        return total_loss_sum / max(num_batches, 1)
+        n = max(num_batches, 1)
+        return {
+            "total_loss": total_loss_sum / n,
+            "policy_loss": policy_loss_sum / n,
+            "value_loss": value_loss_sum / n,
+        }
 
     @torch.no_grad()
-    def evaluate_loss(self) -> float:
-        """Evaluate the average loss over the entire dataset without training.
+    def evaluate_loss(self) -> dict[str, float]:
+        """Evaluate the average loss without training.
+
+        Uses the validation dataset if one was provided, otherwise
+        evaluates on the training dataset.
 
         Returns
         -------
-        float
-            Average total loss.
+        dict
+            Keys: ``total_loss``, ``policy_loss``, ``value_loss`` —
+            average values over the evaluation set.
         """
         self.model.eval()
-        dataloader = self._make_dataloader(shuffle=False)
+        eval_ds = self.val_dataset if self.val_dataset is not None else self.dataset
+        num_workers = 4
+        use_pin_memory = self.device.type == "cuda"
+        dataloader = DataLoader(
+            eval_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=IntegrationDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=use_pin_memory,
+            persistent_workers=num_workers > 0,
+        )
 
         total_loss_sum = 0.0
+        policy_loss_sum = 0.0
+        value_loss_sum = 0.0
         num_batches = 0
 
         for batch in dataloader:
-            total_loss, _, _ = self._compute_loss(batch)
+            total_loss, policy_loss, value_loss = self._compute_loss(batch)
             total_loss_sum += total_loss.item()
+            policy_loss_sum += policy_loss.item()
+            value_loss_sum += value_loss.item()
             num_batches += 1
 
-        return total_loss_sum / max(num_batches, 1)
+        n = max(num_batches, 1)
+        return {
+            "total_loss": total_loss_sum / n,
+            "policy_loss": policy_loss_sum / n,
+            "value_loss": value_loss_sum / n,
+        }
 
     def save_checkpoint(self, path: str) -> None:
         """Save model and optimizer state to a file.

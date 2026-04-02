@@ -10,9 +10,9 @@ and provides two outputs:
 2. **Value** from an MLP head applied to the hidden state at the [SEP]
    position (shape ``(B,)``, in [0, 1]).
 
-Implementation uses ``nn.TransformerDecoder`` as the backbone.  Since this is
-decoder-only (no separate encoder), a dummy all-zeros memory tensor is passed
-to the cross-attention layers.
+Implementation uses ``nn.TransformerEncoder`` with a causal mask to implement
+decoder-only (GPT-style) autoregressive attention — self-attention + FFN only,
+no cross-attention.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class IntegrateZeroModel(nn.Module):
     nhead : int
         Number of attention heads.
     num_layers : int
-        Number of ``TransformerDecoderLayer`` blocks.
+        Number of ``TransformerEncoderLayer`` blocks.
     d_ff : int
         Dimensionality of the feed-forward inner layer.
     max_seq_len : int
@@ -73,8 +73,8 @@ class IntegrateZeroModel(nn.Module):
 
         self.embed_dropout = nn.Dropout(dropout)
 
-        # ---- Transformer Decoder ----
-        decoder_layer = nn.TransformerDecoderLayer(
+        # ---- Transformer Encoder (used as decoder-only with causal mask) ----
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=d_ff,
@@ -82,8 +82,8 @@ class IntegrateZeroModel(nn.Module):
             batch_first=True,
             norm_first=True,  # Pre-LN for training stability
         )
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer,
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
             num_layers=num_layers,
         )
 
@@ -129,10 +129,13 @@ class IntegrateZeroModel(nn.Module):
         """Create an upper-triangular causal mask.
 
         Returns a ``(seq_len, seq_len)`` float tensor where masked positions
-        are ``-inf`` and allowed positions are ``0.0``.
+        are a large negative value and allowed positions are ``0.0``.
+
+        Uses ``-1e9`` instead of ``-inf`` because ``-inf`` causes NaN on
+        Apple MPS devices due to softmax numerical issues.
         """
         mask = torch.triu(
-            torch.full((seq_len, seq_len), float("-inf"), device=device),
+            torch.full((seq_len, seq_len), -1e9, device=device),
             diagonal=1,
         )
         return mask
@@ -182,19 +185,11 @@ class IntegrateZeroModel(nn.Module):
         causal_mask = self._make_causal_mask(T, device)           # (T, T)
         padding_mask = self._make_padding_mask(input_ids)         # (B, T)
 
-        # ---- Dummy memory (decoder-only: no encoder output) ----
-        # Shape: (B, 1, d_model) — a single dummy token of zeros
-        dummy_memory = torch.zeros(B, 1, self.d_model, device=device)
-
-        # ---- Transformer Decoder ----
-        # tgt_mask: causal mask for self-attention (T, T)
-        # tgt_key_padding_mask: padding mask (B, T)
-        # memory_key_padding_mask: not needed (dummy is never padded)
-        hidden = self.transformer_decoder(
-            tgt=x,
-            memory=dummy_memory,
-            tgt_mask=causal_mask,
-            tgt_key_padding_mask=padding_mask,
+        # ---- Transformer Encoder (with causal mask for autoregressive behavior) ----
+        hidden = self.transformer_encoder(
+            src=x,
+            mask=causal_mask,
+            src_key_padding_mask=padding_mask,
         )
 
         # ---- Output logits ----

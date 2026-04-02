@@ -26,6 +26,7 @@ Task 11.
 from __future__ import annotations
 
 import math
+from concurrent.futures import ProcessPoolExecutor
 from typing import List, Optional, Tuple
 
 import sympy
@@ -34,6 +35,17 @@ from sympy import Symbol
 
 from integrate_zero.data.prefix import prefix_to_sympy, sympy_to_prefix
 from integrate_zero.verify.verifier import StepType, is_terminal, verify_step
+
+
+def _verify_step_worker(args):
+    """Top-level worker function for parallel step verification.
+
+    Must be defined at module level so it can be pickled by
+    ``ProcessPoolExecutor``.
+    """
+    state, candidate_expr, x = args
+    from integrate_zero.verify.verifier import verify_step as _verify
+    return _verify(state, candidate_expr, x)
 
 
 class MCTSNode:
@@ -233,6 +245,7 @@ class MCTS:
         self.num_candidates = num_candidates
         self.search_budget = search_budget
         self.c_puct = c_puct
+        self._verify_pool: Optional[ProcessPoolExecutor] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -338,8 +351,8 @@ class MCTS:
         """Expand a leaf node by generating and verifying candidates.
 
         Calls ``_generate_candidates`` to get proposed expressions and
-        their priors, then uses ``MCTSNode.expand_with`` to verify each
-        candidate and add valid ones as children.
+        their priors, then verifies each candidate in parallel using a
+        ``ProcessPoolExecutor`` to avoid serial SymPy bottlenecks.
 
         Parameters
         ----------
@@ -347,8 +360,42 @@ class MCTS:
             The leaf node to expand.
         """
         candidates = self._generate_candidates(node.state)
+        if not candidates:
+            return
+
+        x = Symbol("x")
+
+        # Lazy-initialize the verification worker pool.
+        # Use many workers to exploit multi-core CPUs (e.g., 192-core servers).
+        if self._verify_pool is None:
+            import os
+            cpu_count = os.cpu_count() or 4
+            self._verify_pool = ProcessPoolExecutor(
+                max_workers=min(cpu_count // 2, 64)
+            )
+
+        # Submit all verifications in parallel
+        futures = []
         for expr, prior in candidates:
-            node.expand_with(expr, prior)
+            future = self._verify_pool.submit(
+                _verify_step_worker, (node.state, expr, x)
+            )
+            futures.append((future, expr, prior))
+
+        # Collect results and create child nodes
+        for future, expr, prior in futures:
+            try:
+                step_type = future.result(timeout=10)
+                if step_type != StepType.INVALID:
+                    child = MCTSNode(
+                        state=expr,
+                        prior=prior,
+                        parent=node,
+                        step_type=step_type,
+                    )
+                    node.children.append(child)
+            except Exception:
+                continue
 
     # ------------------------------------------------------------------
     # Placeholders for model integration (Task 11)
@@ -456,7 +503,7 @@ class MCTS:
             # Step 6: Convert back to SymPy
             try:
                 expr = prefix_to_sympy(output_tokens)
-            except (ValueError, TypeError, IndexError):
+            except Exception:
                 continue
 
             candidates.append((expr, uniform_prior))

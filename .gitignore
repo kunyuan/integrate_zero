@@ -5,3 +5,11 @@ dist/
 build/
 *.egg
 .eggs/
+
+# Training artifacts
+checkpoints/
+/data/
+runs/
+
+# Environment
+.env

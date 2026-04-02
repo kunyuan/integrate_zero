@@ -13,6 +13,7 @@ Usage::
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 import sympy
@@ -95,8 +96,12 @@ class Evaluator:
         solved = 0
         total_steps = 0
 
-        for problem in problems:
-            trajectory = mcts.search(problem)
+        # Run MCTS searches in parallel using threads.
+        # GPU inference is thread-safe; SymPy verification uses ProcessPool.
+        with ThreadPoolExecutor(max_workers=min(len(problems), 16)) as executor:
+            trajectories = list(executor.map(mcts.search, problems))
+
+        for trajectory in trajectories:
             if trajectory is not None:
                 solved += 1
                 # trajectory includes the initial problem, so steps = len - 1

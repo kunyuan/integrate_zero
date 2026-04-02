@@ -36,7 +36,7 @@ def test_model_param_count():
     model = IntegrateZeroModel(vocab_size=len(vocab), d_model=384, nhead=6,
                                num_layers=8, d_ff=1536)
     total = sum(p.numel() for p in model.parameters())
-    assert 10_000_000 < total < 20_000_000
+    assert 12_000_000 < total < 16_000_000
 
 
 def test_model_forward_without_explicit_sep_positions():

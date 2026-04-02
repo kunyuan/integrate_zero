@@ -205,7 +205,7 @@ def generate_expression(max_depth: int = 3, *, _max_attempts: int = 200) -> symp
 
 
 def generate_training_pair(
-    max_depth: int = 3, *, _max_attempts: int = 100
+    max_depth: int = 3, *, seed: int | None = None, _max_attempts: int = 100
 ) -> Tuple[sympy.Expr, sympy.Expr]:
     """Generate a training pair ``(f, F)`` where ``f = dF/dx``.
 
@@ -217,12 +217,16 @@ def generate_training_pair(
     ----------
     max_depth : int
         Controls tree depth of the generated antiderivative ``F``.
+    seed : int or None
+        If not None, seed the RNG before generation for reproducibility.
 
     Returns
     -------
     tuple[sympy.Expr, sympy.Expr]
         ``(f, F)`` satisfying ``f == diff(F, x)``.
     """
+    if seed is not None:
+        random.seed(seed)
     for _ in range(_max_attempts):
         F = generate_expression(max_depth=max_depth)
         f = sympy.diff(F, x)

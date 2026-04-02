@@ -16,10 +16,38 @@ from __future__ import annotations
 
 import enum
 import random
+import signal
 from typing import Optional
 
 import sympy
 from sympy import Symbol, Integral, simplify, diff
+
+
+class _Timeout:
+    """Context manager that raises TimeoutError after *seconds*.
+
+    Uses SIGALRM on Unix.  On platforms without SIGALRM the timeout
+    is silently skipped (no protection, but no crash either).
+    """
+
+    def __init__(self, seconds: int) -> None:
+        self.seconds = seconds
+        self._has_alarm = hasattr(signal, "SIGALRM")
+
+    def _handler(self, signum, frame):
+        raise TimeoutError("verification timed out")
+
+    def __enter__(self):
+        if self._has_alarm:
+            self._old = signal.signal(signal.SIGALRM, self._handler)
+            signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._has_alarm:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, self._old)
+        return False
 
 
 class StepType(enum.Enum):
@@ -245,6 +273,7 @@ def verify_step(
     A: sympy.Expr,
     B: sympy.Expr,
     x: Symbol = Symbol("x"),
+    timeout: int = 5,
 ) -> StepType:
     """Verify a transformation step from expression A to expression B.
 
@@ -267,12 +296,27 @@ def verify_step(
         The target expression (the proposed transformation).
     x : Symbol
         The integration / differentiation variable.
+    timeout : int
+        Maximum seconds before declaring the step invalid (default: 5).
 
     Returns
     -------
     StepType
         The classification of the step.
     """
+    try:
+        with _Timeout(timeout):
+            return _verify_step_inner(A, B, x)
+    except TimeoutError:
+        return StepType.INVALID
+
+
+def _verify_step_inner(
+    A: sympy.Expr,
+    B: sympy.Expr,
+    x: Symbol,
+) -> StepType:
+    """Core verification logic (no timeout guard)."""
     # --- 1. Identity rewrite check ---
     if _identity_equal(A, B, x):
         return StepType.IDENTITY
